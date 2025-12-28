@@ -1,4 +1,4 @@
-const { User } = require('../../schemas/index.js')
+const { User, Folder } = require('../../schemas/index.js')
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
 
@@ -35,6 +35,18 @@ class AuthController {
             })
 
             await user.save()
+
+            // Create root folder for the user (My Drive)
+            const rootFolder = new Folder({
+                name: 'My Drive',
+                description: 'Root folder for all documents',
+                parent: null,
+                owner: user._id,
+                isRoot: true,
+                isPublic: false,
+            })
+
+            await rootFolder.save()
 
             res.status(201).json({
                 success: true,

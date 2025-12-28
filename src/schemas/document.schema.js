@@ -27,6 +27,11 @@ const documentSchema = new mongoose.Schema(
             type: String,
             default: 'pdf',
         },
+        folder: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Folder',
+            default: null,
+        },
         category: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'Category',

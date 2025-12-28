@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@google/generative-ai':
+        specifier: ^0.3.0
+        version: 0.3.1
       '@langchain/core':
         specifier: ^0.2.18
         version: 0.2.36
@@ -190,6 +193,10 @@ packages:
 
   '@aws/lambda-invoke-store@0.0.1':
     resolution: {integrity: sha512-ORHRQ2tmvnBXc8t/X9Z8IcSbBA4xTLKuN873FopzklHMeqBst7YG0d+AX97inkvDX+NChYtSr+qGfcqGFaI8Zw==}
+    engines: {node: '>=18.0.0'}
+
+  '@google/generative-ai@0.3.1':
+    resolution: {integrity: sha512-Zh1EK5nCWqIhxPm3K1KOM2mOwwgBvp6lkze74yTj6+Zqibtf55Db1q87cbbzWZeET3ZbNgHMYjVf2JyMM6pI7A==}
     engines: {node: '>=18.0.0'}
 
   '@google/generative-ai@0.7.1':
@@ -1645,6 +1652,8 @@ snapshots:
 
   '@aws/lambda-invoke-store@0.0.1':
     optional: true
+
+  '@google/generative-ai@0.3.1': {}
 
   '@google/generative-ai@0.7.1': {}
 

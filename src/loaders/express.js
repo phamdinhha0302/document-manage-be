@@ -15,8 +15,22 @@ module.exports = (app) => {
   })
 
   app.enable('trust proxy')
+  
+  // Configure CORS for both local and production
+  const allowedOrigins = [
+    'http://localhost:3001',
+    'http://localhost:5173',
+    process.env.FRONTEND_URL || 'https://your-frontend.vercel.app'
+  ].filter(Boolean)
+  
   app.use(cors({
-    origin: '*', // Configure this based on your needs
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true)
+      } else {
+        callback(new Error('Not allowed by CORS'))
+      }
+    },
     credentials: true
   }))
   
