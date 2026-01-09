@@ -73,6 +73,40 @@ const documentSchema = new mongoose.Schema(
             author: { type: String, default: null },
             keywords: [String],
         },
+        ocrContent: {
+            type: String,
+            default: '',
+        },
+        ocrLanguage: {
+            type: String,
+            default: 'eng',
+        },
+        ocrConfidence: {
+            type: Number,
+            default: 0,
+            min: 0,
+            max: 100,
+        },
+        // NEW: OCR Fields with bounding boxes
+        ocrFields: [
+            {
+                text: String,
+                confidence: Number,
+                type: { type: String, default: null },
+                bbox: {
+                    x1: Number,
+                    y1: Number,
+                    x2: Number,
+                    y2: Number,
+                },
+            }
+        ],
+        // NEW: Document type detected by OCR (id_card, passport, etc)
+        documentType: {
+            type: String,
+            default: null,
+            enum: [null, 'id_card', 'passport', 'driver_license', 'other'],
+        },
     },
     { timestamps: true }
 )

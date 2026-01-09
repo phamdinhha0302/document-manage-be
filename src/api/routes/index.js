@@ -79,6 +79,12 @@ router.get('/documents/:id/download', optionalAuthMiddleware, DocumentController
 // Summarize document using Gemini
 router.post('/documents/:id/summarize', authMiddleware, DocumentController.summarizeDocument)
 
+// Upload document with OCR processing (must be before /:id/ocr route)
+router.post('/documents/ocr/upload', authMiddleware, upload.single('file'), DocumentController.uploadAndProcessOCR)
+
+// Process OCR for existing document
+router.post('/documents/:id/ocr', authMiddleware, DocumentController.processOCR)
+
 // ============ CATEGORY ROUTES ============
 // Get all categories
 router.get('/categories', CategoryController.getCategories)
