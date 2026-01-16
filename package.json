@@ -4,7 +4,7 @@
   "description": "A fresh Node.js API project",
   "main": "app.js",
   "dependencies": {
-    "@google/generative-ai": "^0.3.0",
+    "@google/generative-ai": "^0.24.1",
     "@langchain/core": "^0.2.18",
     "@langchain/google-genai": "^0.0.23",
     "@langchain/google-vertexai": "^0.0.21",

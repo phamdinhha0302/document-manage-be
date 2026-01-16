@@ -4,6 +4,269 @@ const path = require("path");
 const fs = require("fs");
 const axios = require("axios");
 const FormData = require("form-data");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+// Initialize Gemini AI
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// Constants
+const MODEL_PRIORITY = [
+  "gemini-2.5-flash",
+  "gemini-2.0-flash-001",
+  "gemini-2.0-flash-lite-001",
+  "gemini-3-flash-preview",
+];
+
+const GENERATION_CONFIG = {
+  temperature: 0.3,
+  responseMimeType: "application/json", // Force JSON response
+};
+
+const FILE_CONFIG = {
+  MAX_CONTENT_SIZE: 5000,
+  FILENAME_PREVIEW_SIZE: 500,
+  CATEGORY_PREVIEW_SIZE: 800,
+  FILENAME_MAX_LENGTH: 50,
+};
+
+const MIME_TYPE_MAP = {
+  pdf: "application/pdf",
+  word: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  png: "image/png",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  gif: "image/gif",
+  bmp: "image/bmp",
+};
+
+/**
+ * Run Gemini AI with retry logic and JSON parsing
+ */
+async function runGemini(prompt, responseSchema = null) {
+  let lastError = null;
+
+  for (const modelName of MODEL_PRIORITY) {
+    try {
+      const config = { ...GENERATION_CONFIG };
+      if (responseSchema) {
+        config.responseSchema = responseSchema;
+      }
+
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        generationConfig: config,
+      });
+
+      const result = await model.generateContent(prompt);
+      let text = result.response.text();
+
+      // Clean markdown code blocks
+      text = text.replace(/```(?:json)?\s*/g, "").trim();
+
+      return JSON.parse(text);
+    } catch (error) {
+      lastError = error;
+
+      // Retry on server errors or rate limits
+      if (error.message?.includes("503") || error.message?.includes("429")) {
+        console.warn(`⚠️ Model ${modelName} unavailable, retrying...`);
+        continue;
+      }
+
+      // Retry on JSON parse errors
+      if (error instanceof SyntaxError) {
+        console.warn(
+          `⚠️ Model ${modelName} returned invalid JSON, retrying...`
+        );
+        continue;
+      }
+
+      // Don't retry on other errors
+      throw error;
+    }
+  }
+
+  throw new Error(
+    `All Gemini models failed: ${lastError?.message || "Unknown error"}`
+  );
+}
+
+/**
+ * Normalize file type to extension
+ */
+function normalizeFileType(fileType) {
+  if (!fileType || typeof fileType !== "string") {
+    throw new Error("Invalid file type");
+  }
+
+  const type = fileType.toLowerCase();
+
+  // Already an extension
+  if (!type.includes("/")) {
+    return type;
+  }
+
+  // Convert MIME type to extension
+  const mimeTypeMap = {
+    "application/pdf": "pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+      "word",
+    "application/msword": "word",
+    "image/png": "png",
+    "image/jpeg": "jpeg",
+    "image/jpg": "jpeg",
+    "image/gif": "gif",
+    "image/bmp": "bmp",
+    "text/plain": "text",
+    "text/markdown": "markdown",
+  };
+
+  const normalized = mimeTypeMap[type];
+  if (normalized) {
+    return normalized;
+  }
+
+  // Fallback: extract from MIME type string
+  if (type.includes("pdf")) return "pdf";
+  if (type.includes("word") || type.includes("officedocument")) return "word";
+  if (type.includes("image")) {
+    if (type.includes("png")) return "png";
+    if (type.includes("gif")) return "gif";
+    if (type.includes("jpeg") || type.includes("jpg")) return "jpeg";
+    if (type.includes("bmp")) return "bmp";
+    return "image";
+  }
+  if (type.includes("text") || type.includes("plain")) return "text";
+  if (type.includes("markdown")) return "markdown";
+
+  throw new Error(`Unsupported MIME type: ${fileType}`);
+}
+
+/**
+ * Extract text content using Gemini Vision
+ */
+async function extractWithGemini(base64Data, mimeType, fileType) {
+  // BUG FIX: Validate base64Data exists before calling toString
+  if (!base64Data) {
+    throw new Error(`File buffer is empty or invalid for ${fileType}`);
+  }
+
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+  const prompt =
+    fileType === "image"
+      ? "Hãy mô tả chi tiết nội dung, chủ đề, và các thông tin quan trọng trong ảnh này. Trả lời bằng tiếng Việt."
+      : "Hãy trích xuất toàn bộ nội dung văn bản từ tài liệu này. Trả lời bằng tiếng Việt.";
+
+  const result = await model.generateContent([
+    {
+      inlineData: {
+        mimeType,
+        data: base64Data,
+      },
+    },
+    { text: prompt },
+  ]);
+
+  const content = result.response.text();
+
+  if (!content?.trim()) {
+    throw new Error(`${fileType} file appears to be empty or unreadable`);
+  }
+
+  return content;
+}
+
+/**
+ * Extract content from different file types
+ */
+async function extractFileContent(
+  fileBuffer,
+  fileType,
+  maxSize = FILE_CONFIG.MAX_CONTENT_SIZE
+) {
+  // BUG FIX: Validate fileBuffer exists
+  if (!fileBuffer) {
+    throw new Error("File buffer is required");
+  }
+
+  try {
+    const ext = normalizeFileType(fileType);
+    let content = "";
+
+    // Text files
+    if (ext === "text" || ext === "plain" || ext === "markdown") {
+      content = fileBuffer.toString("utf-8");
+
+      if (!content?.trim()) {
+        throw new Error("Text file is empty or unreadable");
+      }
+    }
+    // PDF and Word files
+    else if (ext === "pdf" || ext === "word") {
+      const base64Data = fileBuffer.toString("base64");
+      const mimeType = MIME_TYPE_MAP[ext];
+
+      content = await extractWithGemini(
+        base64Data,
+        mimeType,
+        ext.toUpperCase()
+      );
+      console.log(`[Extract] ${ext.toUpperCase()} analyzed by Gemini`);
+    }
+    // Image files
+    else if (["image", "jpeg", "png", "gif", "jpg", "bmp"].includes(ext)) {
+      const base64Data = fileBuffer.toString("base64");
+      const mimeType = MIME_TYPE_MAP[ext] || MIME_TYPE_MAP.jpeg;
+
+      content = await extractWithGemini(base64Data, mimeType, "image");
+      console.log(`[Extract] Image analyzed by Gemini`);
+    } else {
+      throw new Error(`Unsupported file type: ${fileType}`);
+    }
+
+    // Truncate if needed
+    if (content.length > maxSize) {
+      console.log(
+        `[Extract] Content truncated from ${content.length} to ${maxSize} chars`
+      );
+      content = content.substring(0, maxSize) + "... [content truncated]";
+    }
+
+    return content;
+  } catch (error) {
+    console.error("[Extract] Error:", error.message);
+    throw error;
+  }
+}
+
+/**
+ * Clean and validate filename
+ */
+function cleanFileName(name) {
+  if (!name || typeof name !== "string") {
+    throw new Error("Invalid filename");
+  }
+
+  const cleaned = name
+    .toLowerCase()
+    .normalize("NFD") // Normalize Vietnamese characters
+    .replace(/[\u0300-\u036f]/g, "") // Remove diacritics
+    .replace(/đ/g, "d")
+    .replace(/[^a-z0-9-]/g, "-") // Replace special chars with dash
+    .replace(/-+/g, "-") // Remove consecutive dashes
+    .replace(/^-|-$/g, ""); // Remove leading/trailing dashes
+
+  if (!cleaned) {
+    throw new Error("Filename becomes empty after cleaning");
+  }
+
+  // Truncate if too long
+  if (cleaned.length > FILE_CONFIG.FILENAME_MAX_LENGTH) {
+    return cleaned.substring(0, FILE_CONFIG.FILENAME_MAX_LENGTH);
+  }
+
+  return cleaned;
+}
 
 function escapeRegex(text) {
   return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
@@ -458,6 +721,13 @@ class DocumentController {
         folderId,
       } = req.body;
 
+      console.log("[Upload] Request body:", {
+        title,
+        categoryId,
+        tagIds,
+        folderId,
+      });
+
       if (!req.file) {
         return res.status(400).json({
           success: false,
@@ -466,6 +736,10 @@ class DocumentController {
       }
 
       if (!title || !categoryId) {
+        console.error("[Upload] Missing required fields:", {
+          title,
+          categoryId,
+        });
         return res.status(400).json({
           success: false,
           message: "Title and category are required",
@@ -1220,6 +1494,296 @@ class DocumentController {
       res.status(500).json({
         success: false,
         message: error.message || "Upload and OCR processing failed",
+      });
+    }
+  }
+
+  /**
+   * Classify and suggest filename based on content
+   */
+  static async classifyFileName(req, res) {
+    try {
+      // Validate file exists
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message: "File is required",
+        });
+      }
+
+      // Debug log
+      console.log("[ClassifyFileName] File info:", {
+        fieldname: req.file.fieldname,
+        originalname: req.file.originalname,
+        mimetype: req.file.mimetype,
+        size: req.file.size,
+        hasBuffer: !!req.file.buffer,
+        hasPath: !!req.file.path,
+      });
+
+      // Get file buffer (handle both memory and disk storage)
+      let fileBuffer = req.file.buffer;
+            const fileType = req.body.fileType || req.file.mimetype || "unknown";
+      const fileName = req.file.originalname;
+
+      // Extract file content
+      let fileContent;
+      try {
+        fileContent = await extractFileContent(fileBuffer, fileType, 4000);
+        console.log("[ClassifyCategory] Extracted content:", fileContent);
+      } catch (extractError) {
+        console.error(
+          "[ClassifyCategory] Content extraction failed:",
+          extractError.message
+        );
+        return res.status(400).json({
+          success: false,
+          message: `Cannot process file: ${extractError.message}`,
+        });
+      }
+      // AI prompt with schema
+      const prompt = `
+Nhiệm vụ: Đổi tên tệp tin sao cho chuyên nghiệp, chuẩn SEO, viết liền không dấu (kebab-case).
+Dựa vào nội dung file để đề xuất tên phù hợp và có ý nghĩa.
+
+Input:
+- Tên cũ: "${req.file.originalname}"
+- Loại: "${req.file.mimetype}"
+- Nội dung file (preview): "${fileContent.substring(
+        0,
+        FILE_CONFIG.FILENAME_PREVIEW_SIZE
+      )}"
+
+Quy tắc:
+1. PHẢI đặt tên dựa vào NỘI DUNG file, không được sử dụng lại tên cũ.
+2. Chuyển tiếng Việt có dấu thành không dấu.
+3. Thay khoảng trắng bằng dấu gạch ngang (-).
+4. Giữ lại các con số quan trọng (ngày tháng, năm, phiên bản).
+5. Tối đa ${FILE_CONFIG.FILENAME_MAX_LENGTH} ký tự.
+6. Tên PHẢI có ý nghĩa phản ánh nội dung chính của file.
+
+Ví dụ:
+- "Báo cáo tài chính Q1 2024.pdf" -> "bao-cao-tai-chinh-q1-2024"
+- "Hợp đồng lao động Nguyễn Văn A.docx" -> "hop-dong-lao-dong-nguyen-van-a"
+- "IMG_20231010_123456.jpg" -> "anh-chup-2023-10-10"
+
+Trả về JSON với key "suggested_name".
+      `;
+
+      const responseSchema = {
+        type: "object",
+        properties: {
+          suggested_name: { type: "string" },
+        },
+        required: ["suggested_name"],
+      };
+
+      const data = await runGemini(prompt, responseSchema);
+      console.log("[ClassifyFileName] AI Result:", data);
+
+      if (!data.suggested_name) {
+        throw new Error("AI failed to generate filename");
+      }
+
+      // Clean and validate
+      const finalName = cleanFileName(data.suggested_name);
+
+      res.status(200).json({
+        success: true,
+        data: { fileName: finalName },
+      });
+    } catch (error) {
+      console.error("ClassifyFileName Error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Internal server error",
+      });
+    }
+  }
+
+  /**
+   * Classify category based on content
+   */
+  static async classifyCategory(req, res) {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          success: false,
+          message: "File is required",
+        });
+      }
+
+      // Get file buffer (handle both memory and disk storage)
+      let fileBuffer = req.file.buffer;
+
+      // If using disk storage, read file from path
+      if (!fileBuffer && req.file.path) {
+        const fs = require("fs").promises;
+        try {
+          fileBuffer = await fs.readFile(req.file.path);
+          console.log("[ClassifyCategory] Read file from disk:", req.file.path);
+        } catch (readError) {
+          console.error(
+            "[ClassifyCategory] Failed to read file:",
+            readError.message
+          );
+          return res.status(500).json({
+            success: false,
+            message: "Failed to read uploaded file",
+          });
+        }
+      }
+
+      if (!fileBuffer) {
+        return res.status(400).json({
+          success: false,
+          message: "File buffer or path is required",
+        });
+      }
+
+      const fileType = req.body.fileType || req.file.mimetype || "unknown";
+      const fileName = req.file.originalname;
+
+      // Get existing categories
+      const categories = await Category.find().select("_id name").lean();
+
+      // Extract file content
+      let fileContent;
+      try {
+        fileContent = await extractFileContent(fileBuffer, fileType, 4000);
+      } catch (extractError) {
+        console.error(
+          "[ClassifyCategory] Content extraction failed:",
+          extractError.message
+        );
+        return res.status(400).json({
+          success: false,
+          message: `Cannot process file: ${extractError.message}`,
+        });
+      }
+
+      const categoryMap =
+        categories.length > 0
+          ? categories.map((c) => ({ id: c._id.toString(), name: c.name }))
+          : null;
+
+      // Build prompt based on existing categories
+      let prompt;
+      const responseSchema = {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["SELECT", "CREATE"] },
+          target_id: { type: "string" },
+          new_category_name: { type: "string" },
+        },
+        required: ["action"],
+      };
+
+      if (categoryMap?.length > 0) {
+        prompt = `
+Bạn là trợ lý phân loại tài liệu thông minh.
+
+Tài liệu:
+- Tên: "${fileName}"
+- Nội dung (preview): "${fileContent.substring(
+          0,
+          FILE_CONFIG.CATEGORY_PREVIEW_SIZE
+        )}"
+
+Danh sách danh mục hiện có:
+${JSON.stringify(categoryMap, null, 2)}
+
+Nhiệm vụ:
+1. Phân tích nội dung file để hiểu chủ đề chính.
+2. Tìm danh mục phù hợp nhất trong danh sách trên dựa vào chủ đề file.
+3. Nếu KHÔNG có danh mục nào phù hợp, hãy đề xuất tên danh mục mới ngắn gọn (Tiếng Việt).
+4. Ưu tiên chọn danh mục có sẵn hơn là tạo mới để tránh bị rác dữ liệu.
+
+Output JSON:
+- action: "SELECT" hoặc "CREATE"
+- target_id: ID danh mục nếu SELECT (bắt buộc khi SELECT)
+- new_category_name: Tên danh mục mới nếu CREATE (bắt buộc khi CREATE)
+        `;
+      } else {
+        prompt = `
+Bạn là trợ lý phân loại tài liệu thông minh.
+
+Tài liệu:
+- Tên: "${fileName}"
+- Nội dung (preview): "${fileContent.substring(
+          0,
+          FILE_CONFIG.CATEGORY_PREVIEW_SIZE
+        )}"
+
+Hiện tại, chưa có danh mục nào trong hệ thống.
+
+Nhiệm vụ:
+1. Phân tích nội dung file để hiểu chủ đề chính.
+2. Đề xuất một tên danh mục mới phù hợp với nội dung (ngắn gọn, Tiếng Việt).
+
+Output JSON:
+- action: "CREATE"
+- new_category_name: Tên danh mục mới
+        `;
+      }
+
+      const aiResult = await runGemini(prompt, responseSchema);
+      console.log("[ClassifyCategory] AI Result:", aiResult);
+
+      let resultCategoryId = null;
+      let resultCategoryName = null;
+      let isNewCategory = false;
+
+      // Handle SELECT action
+      if (aiResult.action === "SELECT" && aiResult.target_id && categoryMap) {
+        const exists = categories.find(
+          (c) => c._id.toString() === aiResult.target_id
+        );
+        if (exists) {
+          resultCategoryId = exists._id;
+          resultCategoryName = exists.name;
+          isNewCategory = false;
+        }
+      }
+
+      // Handle CREATE action or fallback
+      if (!resultCategoryId && aiResult.new_category_name) {
+        console.log(`[Category] Creating new: ${aiResult.new_category_name}`);
+        const newCategory = new Category({
+          name: aiResult.new_category_name.trim(),
+          description: "Auto-generated by AI",
+        });
+        await newCategory.save();
+        resultCategoryId = newCategory._id;
+        resultCategoryName = newCategory.name;
+        isNewCategory = true;
+      }
+
+      // Final fallback: use first category if available
+      if (!resultCategoryId && categories.length > 0) {
+        resultCategoryId = categories[0]._id;
+        resultCategoryName = categories[0].name;
+        isNewCategory = false;
+      }
+
+      // If still no category, return error
+      if (!resultCategoryId) {
+        throw new Error("Unable to determine category");
+      }
+
+      res.status(200).json({
+        success: true,
+        data: {
+          categoryId: resultCategoryId,
+          categoryName: resultCategoryName,
+          isNewCategory,
+        },
+      });
+    } catch (error) {
+      console.error("ClassifyCategory Error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Internal server error",
       });
     }
   }

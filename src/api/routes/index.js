@@ -21,8 +21,8 @@ if (!fs.existsSync(uploadsDir) && process.env.NODE_ENV !== 'production') {
     }
 }
 
-// Configure multer for file upload
-const storage = multer.diskStorage({
+// Configure multer for file upload (DISK STORAGE)
+const diskStorage = multer.diskStorage({
     destination: function (req, file, cb) {
         cb(null, 'uploads/documents')
     },
@@ -32,18 +32,35 @@ const storage = multer.diskStorage({
     },
 })
 
-const upload = multer({
-    storage: storage,
+// Configure multer for memory storage (for AI processing)
+const memoryStorage = multer.memoryStorage()
+
+// Common multer config
+const multerConfig = {
     limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
     fileFilter: (req, file, cb) => {
-        const allowedMimes = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'text/plain']
+        const allowedMimes = [
+            'application/pdf',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/msword',
+            'image/jpeg',
+            'image/png',
+            'image/gif',
+            'image/bmp',
+            'text/plain',
+            'text/markdown'
+        ]
         if (allowedMimes.includes(file.mimetype)) {
             cb(null, true)
         } else {
-            cb(new Error('Invalid file type'))
+            cb(new Error(`Invalid file type: ${file.mimetype}`))
         }
     },
-})
+}
+
+// Create two upload middleware instances
+const uploadDisk = multer({ storage: diskStorage, ...multerConfig })
+const uploadMemory = multer({ storage: memoryStorage, ...multerConfig })
 
 // ============ AUTH ROUTES ============
 router.post('/auth/register', AuthController.register)
@@ -51,87 +68,50 @@ router.post('/auth/login', AuthController.login)
 router.get('/auth/profile', authMiddleware, AuthController.getProfile)
 
 // ============ STATS ROUTES ============
-// Get dashboard statistics for authenticated user
 router.get('/stats', authMiddleware, StatsController.getStats)
 
 // ============ DOCUMENT ROUTES ============
-// Get all documents (public + user's private)
 router.get('/documents', optionalAuthMiddleware, DocumentController.getDocuments)
-
-// Get single document
 router.get('/documents/:id', optionalAuthMiddleware, DocumentController.getDocument)
 
-// Upload document (requires auth)
-router.post('/documents', authMiddleware, upload.single('file'), DocumentController.uploadDocument)
+// Use DISK storage for document uploads (saved to filesystem)
+router.post('/documents', authMiddleware, uploadDisk.single('file'), DocumentController.uploadDocument)
 
-// Update document (requires auth)
 router.put('/documents/:id', authMiddleware, DocumentController.updateDocument)
-
-// Delete document (requires auth)
 router.delete('/documents/:id', authMiddleware, DocumentController.deleteDocument)
-
-// Search documents
 router.get('/search/documents', optionalAuthMiddleware, DocumentController.searchDocuments)
-
-// Download document
 router.get('/documents/:id/download', optionalAuthMiddleware, DocumentController.downloadDocument)
-
-// Summarize document using Gemini
 router.post('/documents/:id/summarize', authMiddleware, DocumentController.summarizeDocument)
 
-// Upload document with OCR processing (must be before /:id/ocr route)
-router.post('/documents/ocr/upload', authMiddleware, upload.single('file'), DocumentController.uploadAndProcessOCR)
-
-// Process OCR for existing document
+// Use DISK storage for OCR uploads
+router.post('/documents/ocr/upload', authMiddleware, uploadDisk.single('file'), DocumentController.uploadAndProcessOCR)
 router.post('/documents/:id/ocr', authMiddleware, DocumentController.processOCR)
 
 // ============ CATEGORY ROUTES ============
-// Get all categories
 router.get('/categories', CategoryController.getCategories)
-
-// Get single category
 router.get('/categories/:id', CategoryController.getCategory)
-
-// Create category (requires auth)
 router.post('/categories', authMiddleware, CategoryController.createCategory)
-
-// Update category (admin only)
 router.put('/categories/:id', authMiddleware, adminMiddleware, CategoryController.updateCategory)
-
-// Delete category (admin only)
 router.delete('/categories/:id', authMiddleware, adminMiddleware, CategoryController.deleteCategory)
 
 // ============ TAG ROUTES ============
-// Get all tags
 router.get('/tags', TagController.getTags)
-
-// Create tag
 router.post('/tags', authMiddleware, TagController.createTag)
-
-// Delete tag (admin only)
 router.delete('/tags/:id', authMiddleware, adminMiddleware, TagController.deleteTag)
 
 // ============ FOLDER ROUTES ============
-// Get root folders for authenticated user
 router.get('/folders', authMiddleware, FolderController.getRootFolders)
-
-// Get folder hierarchy (contents of a folder)
 router.get('/folders/:folderId/hierarchy', authMiddleware, FolderController.getFolderHierarchy)
-
-// Get breadcrumb path for a folder
 router.get('/folders/:folderId/breadcrumb', authMiddleware, FolderController.getFolderBreadcrumb)
-
-// Create new folder
 router.post('/folders', authMiddleware, FolderController.createFolder)
-
-// Update folder
 router.put('/folders/:folderId', authMiddleware, FolderController.updateFolder)
-
-// Delete folder (with cascading)
 router.delete('/folders/:folderId', authMiddleware, FolderController.deleteFolder)
-
-// Share folder
 router.put('/folders/:folderId/share', authMiddleware, FolderController.shareFolder)
+
+// ============ AI ROUTES ============
+// Use MEMORY storage for AI classification (need buffer for Gemini)
+router.post('/ai/classify-filename', authMiddleware, uploadMemory.single('file'), DocumentController.classifyFileName)
+router.post('/ai/classify-category', authMiddleware, uploadMemory.single('file'), DocumentController.classifyCategory)
 
 // Health check route
 router.get('/health', (req, res) => {
