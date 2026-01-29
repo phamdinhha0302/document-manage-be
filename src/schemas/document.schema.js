@@ -7,13 +7,28 @@ const documentSchema = new mongoose.Schema(
             required: true,
             trim: true,
         },
+        // De-accented title for Vietnamese search
+        titleSearch: {
+            type: String,
+            default: '',
+        },
         description: {
+            type: String,
+            default: '',
+        },
+        // De-accented description for Vietnamese search
+        descriptionSearch: {
             type: String,
             default: '',
         },
         fileName: {
             type: String,
             required: true,
+        },
+        // De-accented fileName for Vietnamese search
+        fileNameSearch: {
+            type: String,
+            default: '',
         },
         fileUrl: {
             type: String,
@@ -77,6 +92,11 @@ const documentSchema = new mongoose.Schema(
             type: String,
             default: '',
         },
+        // De-accented OCR content for Vietnamese search
+        ocrContentSearch: {
+            type: String,
+            default: '',
+        },
         ocrLanguage: {
             type: String,
             default: 'eng',
@@ -111,7 +131,13 @@ const documentSchema = new mongoose.Schema(
     { timestamps: true }
 )
 
-// Index for search
+// Index for search (original text)
 documentSchema.index({ title: 'text', description: 'text', 'metadata.keywords': 'text' })
+
+// Index for Vietnamese accent-insensitive search
+documentSchema.index({ titleSearch: 1 })
+documentSchema.index({ descriptionSearch: 1 })
+documentSchema.index({ fileNameSearch: 1 })
+documentSchema.index({ ocrContentSearch: 1 })
 
 module.exports = mongoose.model('Document', documentSchema)

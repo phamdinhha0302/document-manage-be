@@ -5,6 +5,7 @@ const fs = require("fs");
 const axios = require("axios");
 const FormData = require("form-data");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { normalizeSearchText, removeVietnameseAccents } = require("../../utils");
 // Initialize Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
@@ -442,25 +443,43 @@ class DocumentController {
           // Tìm chính xác cụm từ
           const exactTerm = escapeRegex(cleanSearch.replace(/"/g, ""));
           const exactRegex = new RegExp(exactTerm, "i");
+          // Hỗ trợ tìm kiếm tiếng Việt không dấu
+          const normalizedExactTerm = escapeRegex(normalizeSearchText(cleanSearch.replace(/"/g, "")));
+          const normalizedExactRegex = new RegExp(normalizedExactTerm, "i");
 
           matchStage.$and.push({
             $or: [
+              // Tìm trên field gốc
               { title: exactRegex },
               { description: exactRegex },
               { fileName: exactRegex },
               { ocrContent: exactRegex },
+              // Tìm trên field đã bỏ dấu (Vietnamese accent-insensitive)
+              { titleSearch: normalizedExactRegex },
+              { descriptionSearch: normalizedExactRegex },
+              { fileNameSearch: normalizedExactRegex },
+              { ocrContentSearch: normalizedExactRegex },
             ],
           });
         } else if (!useFuzzy) {
           // Regex matching thông thường (nếu tắt fuzzy)
+          // Hỗ trợ tìm kiếm tiếng Việt không dấu
           const words = cleanSearch.split(/\s+/).map((w) => escapeRegex(w));
+          const normalizedSearch = normalizeSearchText(cleanSearch);
+          const normalizedWords = normalizedSearch.split(/\s+/).map((w) => escapeRegex(w));
 
           matchStage.$and.push({
             $or: [
+              // Tìm trên field gốc với từ khóa gốc
               { title: { $regex: new RegExp(words.join("|"), "i") } },
               { description: { $regex: new RegExp(words.join("|"), "i") } },
               { fileName: { $regex: new RegExp(words.join("|"), "i") } },
               { ocrContent: { $regex: new RegExp(words.join("|"), "i") } },
+              // Tìm trên field đã bỏ dấu với từ khóa đã bỏ dấu (Vietnamese accent-insensitive)
+              { titleSearch: { $regex: new RegExp(normalizedWords.join("|"), "i") } },
+              { descriptionSearch: { $regex: new RegExp(normalizedWords.join("|"), "i") } },
+              { fileNameSearch: { $regex: new RegExp(normalizedWords.join("|"), "i") } },
+              { ocrContentSearch: { $regex: new RegExp(normalizedWords.join("|"), "i") } },
             ],
           });
         }
@@ -549,21 +568,40 @@ class DocumentController {
         const searchWords = cleanSearch.toLowerCase().split(/\s+/);
 
         documents = documents.map((doc) => {
-          // Tính fuzzy score cho từng field
+          // Tính fuzzy score cho từng field (cả gốc và đã bỏ dấu)
           const titleText = doc.title || "";
           const descText = doc.description || "";
           const fileNameText = doc.fileName || "";
           const ocrText = doc.ocrContent || "";
+          
+          // Fields đã bỏ dấu cho Vietnamese accent-insensitive search
+          const titleSearchText = doc.titleSearch || "";
+          const descSearchText = doc.descriptionSearch || "";
+          const fileNameSearchText = doc.fileNameSearch || "";
+          const ocrSearchText = doc.ocrContentSearch || "";
+          
+          // Normalize search query for Vietnamese
+          const normalizedSearch = normalizeSearchText(cleanSearch);
+          const normalizedSearchWords = normalizedSearch.split(/\s+/);
 
-          // A. Regex exact match score (bonus)
+          // A. Regex exact match score (bonus) - cả gốc và đã bỏ dấu
           let regexScore = 0;
           const searchRegex = new RegExp(escapeRegex(cleanSearch), "i");
+          const normalizedSearchRegex = new RegExp(escapeRegex(normalizedSearch), "i");
+          
+          // Match trên field gốc
           if (searchRegex.test(titleText)) regexScore += 10;
           if (searchRegex.test(descText)) regexScore += 5;
           if (searchRegex.test(fileNameText)) regexScore += 8;
           if (searchRegex.test(ocrText)) regexScore += 2;
+          
+          // Match trên field đã bỏ dấu (Vietnamese accent-insensitive)
+          if (normalizedSearchRegex.test(titleSearchText)) regexScore += 10;
+          if (normalizedSearchRegex.test(descSearchText)) regexScore += 5;
+          if (normalizedSearchRegex.test(fileNameSearchText)) regexScore += 8;
+          if (normalizedSearchRegex.test(ocrSearchText)) regexScore += 2;
 
-          // B. Fuzzy matching với từng từ
+          // B. Fuzzy matching với từng từ (cả gốc và đã bỏ dấu)
           let fuzzyMatchCount = 0;
           let totalWords = searchWords.length;
 
@@ -578,11 +616,24 @@ class DocumentController {
               fuzzyMatchCount++;
             }
           });
+          
+          // Fuzzy matching với từ đã normalize (Vietnamese accent-insensitive)
+          normalizedSearchWords.forEach((word) => {
+            const matchInTitleSearch = fuzzyMatchWord(word, titleSearchText, 0.7);
+            const matchInDescSearch = fuzzyMatchWord(word, descSearchText, 0.7);
+            const matchInFileNameSearch = fuzzyMatchWord(word, fileNameSearchText, 0.7);
+            const matchInOCRSearch = fuzzyMatchWord(word, ocrSearchText, 0.7);
+
+            if (matchInTitleSearch || matchInDescSearch || matchInFileNameSearch || matchInOCRSearch) {
+              fuzzyMatchCount++;
+            }
+          });
 
           const fuzzyMatchRatio =
-            totalWords > 0 ? fuzzyMatchCount / totalWords : 0;
+            totalWords > 0 ? fuzzyMatchCount / (totalWords * 2) : 0; // *2 vì check cả gốc và normalized
 
           // C. Hybrid Score (Levenshtein + Jaccard) cho toàn bộ query
+          // Score trên field gốc
           const titleScore = calculateHybridScore(cleanSearch, titleText, {
             levenshtein: 0.4,
             jaccard: 0.6,
@@ -600,10 +651,32 @@ class DocumentController {
             levenshtein: 0.2,
             jaccard: 0.8,
           });
+          
+          // Score trên field đã bỏ dấu (Vietnamese accent-insensitive)
+          const titleSearchScore = calculateHybridScore(normalizedSearch, titleSearchText, {
+            levenshtein: 0.4,
+            jaccard: 0.6,
+          });
+          const descSearchScore = calculateHybridScore(normalizedSearch, descSearchText, {
+            levenshtein: 0.3,
+            jaccard: 0.7,
+          });
+          const fileNameSearchScore = calculateHybridScore(
+            normalizedSearch,
+            fileNameSearchText,
+            { levenshtein: 0.4, jaccard: 0.6 }
+          );
+          const ocrSearchScore = calculateHybridScore(normalizedSearch, ocrSearchText, {
+            levenshtein: 0.2,
+            jaccard: 0.8,
+          });
 
-          // D. Tổng hợp điểm
+          // D. Tổng hợp điểm (lấy max giữa gốc và normalized)
           const hybridScore =
-            titleScore * 10 + descScore * 5 + fileNameScore * 8 + ocrScore * 2;
+            Math.max(titleScore, titleSearchScore) * 10 + 
+            Math.max(descScore, descSearchScore) * 5 + 
+            Math.max(fileNameScore, fileNameSearchScore) * 8 + 
+            Math.max(ocrScore, ocrSearchScore) * 2;
           const fuzzyWordBonus = fuzzyMatchRatio * 15; // Bonus nếu match nhiều từ
           const finalScore = regexScore + hybridScore + fuzzyWordBonus;
 
@@ -614,10 +687,10 @@ class DocumentController {
               hybridScore: parseFloat(hybridScore.toFixed(2)),
               fuzzyWordBonus: parseFloat(fuzzyWordBonus.toFixed(2)),
               fuzzyMatchRatio: parseFloat(fuzzyMatchRatio.toFixed(2)),
-              titleScore: parseFloat(titleScore.toFixed(2)),
-              descScore: parseFloat(descScore.toFixed(2)),
-              fileNameScore: parseFloat(fileNameScore.toFixed(2)),
-              ocrScore: parseFloat(ocrScore.toFixed(2)),
+              titleScore: parseFloat(Math.max(titleScore, titleSearchScore).toFixed(2)),
+              descScore: parseFloat(Math.max(descScore, descSearchScore).toFixed(2)),
+              fileNameScore: parseFloat(Math.max(fileNameScore, fileNameSearchScore).toFixed(2)),
+              ocrScore: parseFloat(Math.max(ocrScore, ocrSearchScore).toFixed(2)),
             },
             finalScore: parseFloat(finalScore.toFixed(2)),
           };
@@ -784,11 +857,14 @@ class DocumentController {
         fileType = "text";
       }
 
-      // Create document
+      // Create document with search fields for Vietnamese accent-insensitive search
       const document = new Document({
         title,
+        titleSearch: normalizeSearchText(title),
         description,
+        descriptionSearch: normalizeSearchText(description || ""),
         fileName: req.file.originalname,
+        fileNameSearch: normalizeSearchText(req.file.originalname),
         fileUrl: `/uploads/documents/${req.file.filename}`,
         fileSize: req.file.size,
         fileType,
@@ -797,6 +873,7 @@ class DocumentController {
         folder: folderId || null,
         uploadedBy: req.user.userId,
         ocrContent: "",
+        ocrContentSearch: "",
         ocrLanguage: "eng",
         ocrConfidence: 0,
       });
@@ -845,9 +922,15 @@ class DocumentController {
         });
       }
 
-      // Update fields
-      if (title) document.title = title;
-      if (description) document.description = description;
+      // Update fields with search fields for Vietnamese accent-insensitive search
+      if (title) {
+        document.title = title;
+        document.titleSearch = normalizeSearchText(title);
+      }
+      if (description) {
+        document.description = description;
+        document.descriptionSearch = normalizeSearchText(description);
+      }
       if (categoryId) document.category = categoryId;
       if (tagIds) document.tags = tagIds;
       if (notes) document.notes = notes;
@@ -922,7 +1005,7 @@ class DocumentController {
     }
   }
 
-  // Search documents
+  // Search documents with Vietnamese accent-insensitive support
   static async searchDocuments(req, res) {
     try {
       const { q, category, tags, page = 1, limit = 10 } = req.query;
@@ -938,26 +1021,37 @@ class DocumentController {
         query = { isPublic: true };
       }
 
-      // Fuzzy search on keywords if provided
+      // Fuzzy search on keywords if provided - with Vietnamese accent support
       if (q) {
+        // Original search term (for exact match with accents)
         const fuzzyRegex = new RegExp(q, "i");
-        query.$or = [
+        
+        // De-accented search term (for Vietnamese accent-insensitive search)
+        const normalizedQuery = normalizeSearchText(q);
+        const normalizedRegex = new RegExp(normalizedQuery, "i");
+        
+        // Search conditions:
+        // 1. Original fields with original query (exact match with accents)
+        // 2. Search fields with normalized query (accent-insensitive)
+        // 3. Original fields with normalized query (for files without accents)
+        const searchConditions = [
+          // Original text search (for when user searches with correct accents)
           { title: fuzzyRegex },
           { description: fuzzyRegex },
           { ocrContent: fuzzyRegex },
+          { fileName: fuzzyRegex },
+          // Normalized search (for Vietnamese accent-insensitive)
+          { titleSearch: normalizedRegex },
+          { descriptionSearch: normalizedRegex },
+          { ocrContentSearch: normalizedRegex },
+          { fileNameSearch: normalizedRegex },
         ];
 
         // Need to restructure query if we have auth conditions
         if (req.user) {
           query = {
             $and: [
-              {
-                $or: [
-                  { title: fuzzyRegex },
-                  { description: fuzzyRegex },
-                  { ocrContent: fuzzyRegex },
-                ],
-              },
+              { $or: searchConditions },
               {
                 $or: [{ isPublic: true }, { uploadedBy: req.user.userId }],
               },
@@ -966,13 +1060,7 @@ class DocumentController {
         } else {
           query = {
             $and: [
-              {
-                $or: [
-                  { title: fuzzyRegex },
-                  { description: fuzzyRegex },
-                  { ocrContent: fuzzyRegex },
-                ],
-              },
+              { $or: searchConditions },
               { isPublic: true },
             ],
           };
@@ -1333,8 +1421,9 @@ class DocumentController {
         }, Confidence: ${confidence}, Fields: ${fields?.length || 0}`
       );
 
-      // Save OCR result to database
+      // Save OCR result to database with search field for Vietnamese accent-insensitive search
       document.ocrContent = text || "";
+      document.ocrContentSearch = normalizeSearchText(text || "");
       document.ocrLanguage = language;
 
       // --- FIX: Không nhân 100 nữa ---
@@ -1422,11 +1511,14 @@ class DocumentController {
       const fileType = req.file.mimetype.split("/")[1] || "unknown";
       const fileSize = req.file.size;
 
-      // Create document
+      // Create document with search fields for Vietnamese accent-insensitive search
       const newDocument = new Document({
         title,
+        titleSearch: normalizeSearchText(title),
         description,
+        descriptionSearch: normalizeSearchText(description || ""),
         fileName,
+        fileNameSearch: normalizeSearchText(fileName),
         fileUrl,
         fileSize,
         fileType,
@@ -1468,6 +1560,7 @@ class DocumentController {
 
         const { text, confidence, fields = [] } = ocrResponse.data;
         newDocument.ocrContent = text || "";
+        newDocument.ocrContentSearch = normalizeSearchText(text || "");
         newDocument.ocrLanguage = language;
 
         // --- FIX: Không nhân 100 nữa ---
